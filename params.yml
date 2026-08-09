@@ -1,0 +1,18 @@
+
+preprocessing:
+  min_rating: 3.5
+  max_users: 2000
+  max_movies: 2000
+
+feature_engineering:
+  model_name: "all-MiniLM-L6-v2"
+  val_ratio: 0.1
+  test_ratio: 0.1
+  neg_sampling_ratio: 1.0
+
+train:
+  epochs: 40
+  learning_rate: 0.001
+  hidden_channels: 128
+  weight_decay: 0.0001
+  k: 10
