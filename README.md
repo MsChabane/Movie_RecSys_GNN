@@ -1,337 +1,180 @@
 
-MOVIE RECOMMENDATION SYSTEM WITH GRAPHSAGE
-==========================================
+# Movie Recommendation System (Heterogeneous GraphSAGE + FAISS)
 
-This project implements a movie recommendation system using:
+A scalable, production-grade recommender system built using Graph Neural Networks (GNNs), vector similarity search, and modern MLOps practices. 
 
-- MovieLens-style movie and rating data
-- PyTorch Geometric
-- Heterogeneous GraphSAGE
-- Sentence Transformers for movie features
-- FAISS for fast item similarity search
-- DVC for data and pipeline versioning
+The architecture models user-item interactions as a bipartite graph, leveraging **Heterogeneous GraphSAGE** (via PyTorch Geometric) for structural representation learning and **SentenceTransformers** for semantic item feature serialization. The pipeline is fully orchestrated and version-controlled with **DVC**, served via a **FastAPI** REST backend, and monitored through a **Streamlit** evaluation dashboard.
 
-The system creates a bipartite graph:
+---
 
-    User -- interacts/rates --> Movie
+## Core Technologies
 
-Positive ratings are converted into user-movie interaction edges.
-Movie title and genres are serialized into text and converted into
-dense feature vectors using a Sentence Transformer model
+* **Deep Learning & GNNs**: PyTorch, PyTorch Geometric (`torch_geometric`)
+* **Semantic Feature Extraction**: SentenceTransformers (`all-MiniLM-L6-v2`)
+* **Vector Search**: FAISS (Facebook AI Similarity Search)
+* **Pipeline & Data Versioning**: DVC (Data Version Control)
+* **REST API**: FastAPI, Uvicorn, Pydantic
+* **Dashboard & Evaluation**: Streamlit, Matplotlib, Pandas
+* **Ingestion**: KaggleHub API
 
-INSTALLATION
-============
+---
 
-Install the dependencies:
+## Architecture Overview
 
-    pip install -r requirements.txt
+1. **Bipartite Graph Construction**:
+   * **Nodes**: User nodes (trainable embeddings) and Item nodes (dense text embeddings derived from JSON property serialization).
+   * **Edges**: Interaction edges (`interacts` / `rev_interacts`) created from positive ratings ($\ge 3.5$ stars).
 
-For Google Colab, use:
+2. **GraphSAGE Propagation**:
+   * Message passing accumulates 2-hop neighborhood representations across user and item nodes.
+   * Final latent representations are $L_2$-normalized to enforce Cosine Similarity geometry in the embedding space.
 
-    !pip install -q kagglehub dvc sentence-transformers torch-geometric faiss-cpu PyYAML
+3. **Sub-Millisecond Inference**:
+   * Offline pipeline extracts item node representations into a **FAISS Index** (`IndexFlatIP`).
+   * Inference fetches user vectors and executes top-$K$ inner-product vector search while masking out historical interactions.
 
+---
 
-DATASET
-=======
+## Installation & Setup
 
-The default dataset is downloaded from Kaggle:
+### 1. Prerequisites
+Python 3.10+ and `pip` are required.
 
-    parasharmanas/movie-recommendation-system
+### 2. Environment Setup
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-The dataset should contain:
+---
 
-    movies.csv
-    ratings.csv
+## Pipeline Execution (DVC)
 
-The expected columns are:
+The entire workflow—from data download to model training and index generation—is managed as a reproducible Directed Acyclic Graph (DAG) using **DVC**.
 
-movies.csv:
+### Pipeline Stages
 
-    movieId
-    title
-    genres
+1. **Data Ingestion** (`src/data_ingestion.py`): Downloads raw data (`movies.csv`, `ratings.csv`) to `data/raw/`.
+2. **Preprocessing** (`src/preprocessing.py`): Cleans NaNs, filters ratings ($\ge 3.5$), serializes movie metadata into JSON attributes, and outputs cleaned CSVs to `data/preprocessed/`.
+3. **Feature Engineering** (`src/feature_engineering.py`): Encodes movie properties using SentenceTransformers, constructs PyG `HeteroData`, splits positive edges (`RandomLinkSplit`), and saves graph tensors to `data/processed/`.
+4. **Training** (`src/train.py`): Trains GraphSAGE, tracks metrics (Recall@K, NDCG@K, Loss), writes `artifacts/metrics.json`, builds the FAISS index, and exports user embeddings.
 
-ratings.csv:
+### Pipeline Commands
 
-    userId
-    movieId
-    rating
-    timestamp
+* **Run Full Pipeline**:
+  ```bash
+  dvc repro
+  ```
 
-Kaggle authentication may be required when downloading the dataset.
-If authentication is required, configure the Kaggle API credentials before
-running the ingestion stage.
+* **Force Rerun a Specific Stage**:
+  ```bash
+  dvc repro -f train
+  ```
 
+* **Inspect Pipeline Graph**:
+  ```bash
+  dvc dag
+  ```
 
-PIPELINE STAGES
-===============
+* **View Performance Metrics**:
+  ```bash
+  dvc metrics show
+  ```
 
-1. DATA INGESTION
+---
 
-Downloads the Kaggle dataset and stores the raw files in:
+## Hyperparameter Configuration (`params.yaml`)
 
-    data/raw/
+All pipeline parameters are managed centrally in `params.yaml`. Modifying any parameter triggers DVC to rerun only the affected downstream stages upon running `dvc repro`.
 
-Run:
+```yaml
+preprocessing:
+  min_rating: 3.5
+  max_users: 2000
+  max_movies: 3000
 
-    python src/data_ingestion.py
+feature_engineering:
+  model_name: "all-MiniLM-L6-v2"
+  val_ratio: 0.1
+  test_ratio: 0.1
+  neg_sampling_ratio: 1.0
 
+train:
+  epochs: 35
+  learning_rate: 0.005
+  hidden_channels: 128
+  weight_decay: 0.0001
+  k: 10
+```
 
-2. PREPROCESSING
+---
 
-Loads the raw CSV files, then:
+## Serving the REST API (FastAPI)
 
-- Removes missing values
-- Removes duplicate movies
-- Removes duplicate user-movie ratings
-- Filters positive ratings
-- Selects active users and popular movies
-- Converts movie data to the target schema
-- Serializes movie properties as JSON
+The API loads precomputed FAISS indices and user embeddings into memory during startup for low-latency serving.
 
-Output files:
+### Start Server
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-    data/preprocessed/items.csv
-    data/preprocessed/users.csv
-    data/preprocessed/interactions.csv
+### Key Endpoints
 
-Run:
+* `GET /health`: Health check and status of loaded FAISS index and user vectors.
+* `GET /recommend/{user_id}?top_k=5&filter_seen=true`: Retrieve Top-$K$ recommendations for a user.
+* `POST /recommend`: Accepts JSON payload for recommendation requests.
+* `GET /docs`: Interactive Swagger API documentation UI.
 
-    python src/preprocessing.py
+### Example Request (`POST /recommend`)
+```bash
+curl -X 'POST' \
+  'http://localhost:8000/recommend' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "user_id": "user_187",
+  "top_k": 5,
+  "filter_seen": true
+}'
+```
 
+---
 
-3. FEATURE ENGINEERING
+## Streamlit Evaluation Dashboard
 
-Loads the preprocessed data and:
+The dashboard provides an interactive UI to inspect model metrics, training loss curves, hyperparameter configurations, and model predictions evaluated directly against held-out test data (`data/processed/test_data.pt`).
 
-- Creates string-to-integer ID mappings
-- Serializes movie properties into text
-- Generates movie embeddings using Sentence Transformers
-- Creates the PyTorch Geometric heterogeneous graph
-- Adds reverse user-movie edges
-- Splits graph edges into train, validation, and test sets
+### Run Dashboard
+```bash
+streamlit run dashboard.py --server.port 8501
+```
 
-Outputs:
+### Dashboard Features
+* **Metrics & Parameters**: View summary metrics (`metrics.json`), loss history, ranking metric curves (Recall@10, NDCG@10), and active `params.yaml` parameters.
+* **Test Set Comparison**: Select any user to evaluate Top-$K$ model predictions against positive ground truth edges from `test_data.pt`. Matches are automatically tagged with hit badges (`🎯 HIT!`).
 
-    data/processed/train_data.pt
-    data/processed/val_data.pt
-    data/processed/test_data.pt
-    data/processed/full_graph.pt
+---
 
-Mapping artifacts:
+## Offline Inference Usage
 
-    artifacts/user2id.json
-    artifacts/item2id.json
-    artifacts/id2item.json
+For standalone Python execution without running the web server:
 
-Run:
+```python
+from src.inference import RecommenderInference
 
-    python src/feature_engineering.py
+# Initialize engine (loads precomputed FAISS index & embeddings)
+engine = RecommenderInference(
+    artifacts_dir="artifacts",
+    preprocessed_dir="data/preprocessed"
+)
 
+# Generate recommendations
+recommendations = engine.recommend(
+    user_str_id="user_187",
+    top_k=5,
+    filter_seen=True
+)
 
-4. TRAINING
-
-The training stage:
-
-- Loads the processed graph data
-- Trains a heterogeneous GraphSAGE model
-- Computes training and validation loss
-- Computes Recall@10
-- Computes NDCG@10
-- Saves the best metrics and training history
-- Creates a training plot
-- Generates final user and movie embeddings
-- Builds a FAISS item index
-
-Outputs:
-
-    artifacts/model.pt
-    artifacts/metrics.json
-    artifacts/training_plot.png
-    artifacts/item_faiss.index
-    artifacts/user_embeddings.json
-
-Run:
-
-    python src/train.py
-
-
-5. INFERENCE
-
-The inference stage loads:
-
-- The FAISS movie index
-- Precomputed user embeddings
-- ID mappings
-- Movie metadata
-- User interaction history
-
-It returns top-K movies for a user and filters movies that the user
-has already rated.
-
-Run:
-
-    python src/inference.py
-
-
-DVC PIPELINE
-============
-
-Initialize DVC in standalone mode:
-
-    dvc init --no-scm -f
-
-Run the complete pipeline:
-
-    dvc repro
-
-Display the pipeline graph:
-
-    dvc dag
-
-Display metrics:
-
-    dvc metrics show
-
-Check pipeline status:
-
-    dvc status
-
-The DVC stages are:
-
-    data_ingestion
-          |
-          v
-    preprocessing
-          |
-          v
-    feature_engineering
-          |
-          v
-    train
-
-
-PARAMETERS
-==========
-
-Model and pipeline parameters are stored in params.yaml.
-
-Example:
-
-    preprocessing:
-      min_rating: 3.5
-      max_users: 2000
-      max_movies: 3000
-
-    feature_engineering:
-      model_name: all-MiniLM-L6-v2
-      val_ratio: 0.1
-      test_ratio: 0.1
-      neg_sampling_ratio: 1.0
-
-    train:
-      epochs: 35
-      learning_rate: 0.005
-      hidden_channels: 128
-      weight_decay: 0.0001
-      k: 10
-
-After changing params.yaml, run:
-
-    dvc repro
-
-DVC will rerun only the stages affected by the changed parameters.
-
-
-METRICS
-=======
-
-The metrics file is:
-
-    artifacts/metrics.json
-
-It contains:
-
-- Training parameters
-- Final training loss
-- Final validation loss
-- Best validation Recall@K
-- Best validation NDCG@K
-- Best metric epochs
-- Per-epoch training loss
-- Per-epoch validation loss
-- Per-epoch Recall@K
-- Per-epoch NDCG@K
-
-View the file:
-
-    python -m json.tool artifacts/metrics.json
-
-Or in a notebook:
-
-    import json
-
-    with open("artifacts/metrics.json", "r") as file:
-        metrics = json.load(file)
-
-    print(json.dumps(metrics, indent=2))
-
-
-DISPLAY THE TRAINING PLOT
-========================
-
-The plot is saved to:
-
-    artifacts/training_plot.png
-
-In Google Colab:
-
-    from IPython.display import Image, display
-
-    display(Image(filename="artifacts/training_plot.png"))
-
-Using Matplotlib:
-
-    import matplotlib.pyplot as plt
-    import matplotlib.image as mpimg
-
-    image = mpimg.imread("artifacts/training_plot.png")
-    plt.figure(figsize=(16, 7))
-    plt.imshow(image)
-    plt.axis("off")
-    plt.show()
-
-
-INFERENCE EXAMPLE
-=================
-
-Use the inference class:
-
-    from src.inference import RecommenderInference
-
-    recommender = RecommenderInference()
-
-    recommendations = recommender.recommend(
-        user_str_id="user_187",
-        top_k=5,
-        filter_seen=True
-    )
-
-    for recommendation in recommendations:
-        print(recommendation)
-
-
-COLD-START USERS
-================
-
-If a user is not present in user_embeddings.json, the inference module
-uses the average user embedding as a fallback.
-
-This is a basic cold-start strategy. A production system could improve
-this by using:
-
-- Popular movies
-- Genre-based recommendations
-- Recently trending movies
-- New-user onboarding preferences
-- A separate content-based recommendation model
+for rec in recommendations:
+    print(f"Score: {rec['score']:.4f} | Title: {rec['title']} | Genres: {rec['genres']}")
+```
