@@ -1,0 +1,16 @@
+.git
+.gitignore
+.dvc
+.dvcignore
+data/raw/
+data/processed/
+mlruns/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+.env
+dashboard.py
+README.md
