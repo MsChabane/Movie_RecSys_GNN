@@ -1,4 +1,5 @@
 fastapi
+streamlit 
 uvicorn
 numpy>=1.26
 pandas>=2.0
